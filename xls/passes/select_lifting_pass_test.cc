@@ -243,6 +243,92 @@ TEST_F(SelectLiftingPassTest, LiftSingleSelectWithNoCases) {
   EXPECT_THAT(Run(f), absl_testing::IsOkAndHolds(false));
 }
 
+TEST_F(SelectLiftingPassTest, LiftBinaryOperationSharedLHS) {
+  auto p = CreatePackage();
+  auto p_expect = CreatePackage();
+  XLS_ASSERT_OK_AND_ASSIGN(Function * f_lhs, ParseFunction(R"(
+    fn func_lhs(selector: bits[1] id=10, shared: bits[32] id=11, case_a: bits[32] id=12, case_b: bits[32] id=13) -> bits[32] {
+      add.14: bits[32] = add(shared, case_a, id=14)
+      add.15: bits[32] = add(shared, case_b, id=15)
+      ret sel.16: bits[32] = sel(selector, cases=[add.14, add.15], id=16)
+    }
+  )",
+                                                           p.get()));
+  XLS_ASSERT_OK_AND_ASSIGN(Function * f_lhs_expect,
+                           ParseFunction(R"(
+    fn func_lhs(selector: bits[1] id=10, shared: bits[32] id=11, case_a: bits[32] id=12, case_b: bits[32] id=13) -> bits[32] {
+      sel.16: bits[32] = sel(selector, cases=[case_a, case_b], id=16)
+      ret add_reduced: bits[32] = add(shared, sel.16, id=17)
+    }
+  )",
+                                         p_expect.get()));
+
+  EXPECT_THAT(Run(f_lhs), absl_testing::IsOkAndHolds(true));
+  VLOG(3) << "After the transformations:" << f_lhs->DumpIr();
+  EXPECT_EQ(f_lhs->node_count(), 6);
+  VLOG(3) << f_lhs->DumpIr();
+  EXPECT_TRUE(f_lhs->IsDefinitelyEqualTo(f_lhs_expect));
+}
+
+TEST_F(SelectLiftingPassTest, LiftBinaryOperationSharedRHSWithDefault) {
+  auto p = CreatePackage();
+  auto p_expect = CreatePackage();
+  XLS_ASSERT_OK_AND_ASSIGN(Function * f_rhs, ParseFunction(R"(
+    fn func_rhs(selector: bits[2] id=20, shared: bits[32] id=21, case_a: bits[32] id=22, case_b: bits[32] id=23, default_case: bits[32] id=24) -> bits[32] {
+      smul.25: bits[32] = smul(case_a, shared, id=25)
+      smul.26: bits[32] = smul(case_b, shared, id=26)
+      smul.27: bits[32] = smul(default_case, shared, id=27)
+      ret sel.28: bits[32] = sel(selector, cases=[smul.25, smul.26], default=smul.27, id=28)
+    }
+  )",
+                                                           p.get()));
+  XLS_ASSERT_OK_AND_ASSIGN(Function * f_rhs_expect,
+                           ParseFunction(R"(
+    fn func_rhs(selector: bits[2] id=20, shared: bits[32] id=21, case_a: bits[32] id=22, case_b: bits[32] id=23, default_case: bits[32] id=24) -> bits[32] {
+      sel.28: bits[32] = sel(selector, cases=[case_a, case_b], default=default_case, id=28)
+      ret smul_reduced: bits[32] = smul(sel.28, shared, id=29)
+    }
+  )",
+                                         p_expect.get()));
+  EXPECT_THAT(Run(f_rhs), absl_testing::IsOkAndHolds(true));
+  VLOG(3) << "After the transformations:" << f_rhs->DumpIr();
+  EXPECT_EQ(f_rhs->node_count(), 7);
+  VLOG(3) << f_rhs->DumpIr();
+  EXPECT_TRUE(f_rhs->IsDefinitelyEqualTo(f_rhs_expect));
+}
+
+TEST_F(SelectLiftingPassTest, DontLiftBinaryOpsSharingInconsistentOperandSide) {
+  auto p = CreatePackage();
+  XLS_ASSERT_OK_AND_ASSIGN(Function * f_not_consistent, ParseFunction(R"(
+    fn func_not_consistent(selector: bits[1] id=30, shared: bits[32] id=31, case_a: bits[32] id=32, case_b: bits[32] id=33) -> bits[32] {
+      add.34: bits[32] = add(shared, case_a, id=34)
+      add.35: bits[32] = add(case_b, shared, id=35)
+      ret sel.36: bits[32] = sel(selector, cases=[add.34, add.35], id=36)
+    }
+  )",
+                                                                      p.get()));
+
+  EXPECT_THAT(Run(f_not_consistent), absl_testing::IsOkAndHolds(false));
+  VLOG(3) << "After no transformation:" << f_not_consistent->DumpIr();
+  EXPECT_EQ(f_not_consistent->node_count(), 7);
+}
+
+TEST_F(SelectLiftingPassTest, DontLiftBinaryOpsUsingDifferentOperationTypes) {
+  auto p = CreatePackage();
+  XLS_ASSERT_OK_AND_ASSIGN(Function * f_different_ops, ParseFunction(R"(
+    fn func_different_ops(selector: bits[1] id=40, shared: bits[32] id=41, case_a: bits[32] id=42, case_b: bits[32] id=43) -> bits[32] {
+      add.44: bits[32] = add(shared, case_a, id=44)
+      sub.45: bits[32] = sub(shared, case_b, id=45)
+      ret sel.46: bits[32] = sel(selector, cases=[add.44, sub.45], id=46)
+    }
+  )",
+                                                                     p.get()));
+
+  EXPECT_THAT(Run(f_different_ops), absl_testing::IsOkAndHolds(false));
+  VLOG(3) << "After no transformation:" << f_different_ops->DumpIr();
+  EXPECT_EQ(f_different_ops->node_count(), 7);
+}
+
 }  // namespace
 
 }  // namespace xls
